@@ -1,16 +1,8 @@
 'use client'
 
-import React, { createContext, useContext, useEffect, useState } from 'react'
+import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { Message, User } from '@/lib/types'
-import { 
-  setCurrentUserId as storeSetCurrentUserId,
-  getCurrentUserId as storeGetCurrentUserId,
-  getCurrentUser as storeGetCurrentUser,
-  getOtherUser as storeGetOtherUser,
-  getMessages as storeGetMessages,
-  addMessage as storeAddMessage,
-  removeLoadingMessage as storeRemoveLoadingMessage
-} from '@/lib/chatStore'
+import { getUsers } from '@/lib/chatStore'
 
 interface ChatContextType {
   messages: Message[]
@@ -20,88 +12,147 @@ interface ChatContextType {
   switchUser: (userId: string) => void
 }
 
+const CHAT_MESSAGES_KEY = 'messenger_chat_messages_v1'
+const CHAT_USER_KEY = 'messenger_chat_user_v1'
+
 const ChatContext = createContext<ChatContextType | undefined>(undefined)
 
-export function ChatProvider({ children }: { children: React.ReactNode }) {
-  const [messages, setMessages] = useState<Message[]>([])
-  const [currentUser, setCurrentUser] = useState<User | null>(null)
-  const [otherUser, setOtherUser] = useState<User | null>(null)
-  const [broadcastChannel, setBroadcastChannel] = useState<BroadcastChannel | null>(null)
+function readMessagesFromStorage(): Message[] {
+  if (typeof window === 'undefined') return []
 
-  // Initialize BroadcastChannel for cross-tab communication
+  const raw = window.localStorage.getItem(CHAT_MESSAGES_KEY)
+  if (!raw) return []
+
+  try {
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed as Message[]
+  } catch {
+    return []
+  }
+}
+
+function persistMessages(messages: Message[]) {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(CHAT_MESSAGES_KEY, JSON.stringify(messages))
+}
+
+export function ChatProvider({ children }: { children: React.ReactNode }) {
+  const users = useMemo(() => getUsers(), [])
+  const [messages, setMessages] = useState<Message[]>([])
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null)
+  const channelRef = useRef<BroadcastChannel | null>(null)
+
+  const currentUser = currentUserId ? users[currentUserId] ?? null : null
+  const otherUser = currentUserId
+    ? users[currentUserId === 'user1' ? 'user2' : 'user1'] ?? null
+    : null
+
   useEffect(() => {
+    const savedMessages = readMessagesFromStorage()
+    setMessages(savedMessages)
+
+    const savedUserId = window.sessionStorage.getItem(CHAT_USER_KEY)
+    const fallbackUserId = users.user1?.id ?? null
+    const nextUserId = savedUserId && users[savedUserId] ? savedUserId : fallbackUserId
+    setCurrentUserId(nextUserId)
+
+    if (nextUserId) {
+      window.sessionStorage.setItem(CHAT_USER_KEY, nextUserId)
+    }
+
     try {
       const channel = new BroadcastChannel('chat_channel')
-      setBroadcastChannel(channel)
+      channelRef.current = channel
 
       channel.onmessage = (event) => {
-        const { type, data } = event.data
-        if (type === 'message') {
-          storeAddMessage(data)
-          setMessages([...storeGetMessages()])
-        } else if (type === 'user_switch') {
-          storeSetCurrentUserId(data.userId)
-          setCurrentUser(storeGetCurrentUser())
-          setOtherUser(storeGetOtherUser())
-          setMessages([...storeGetMessages()])
+        const { type, data } = event.data ?? {}
+
+        if (type === 'message_loading') {
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === data.id)) return prev
+            const next = [...prev, data as Message]
+            persistMessages(next)
+            return next
+          })
+        }
+
+        if (type === 'message_final') {
+          setMessages((prev) => {
+            const withoutLoading = prev.filter((m) => m.id !== data.loadingId)
+            if (withoutLoading.some((m) => m.id === data.message.id)) return withoutLoading
+            const next = [...withoutLoading, data.message as Message]
+            persistMessages(next)
+            return next
+          })
         }
       }
-
-      return () => channel.close()
-    } catch (e) {
-      console.warn('BroadcastChannel not supported, using single-tab mode')
+    } catch {
+      // BroadcastChannel is optional; localStorage synchronization still works.
     }
-  }, [])
 
-  // Initialize user
-  useEffect(() => {
-    const currentUserId = storeGetCurrentUserId()
-    if (!currentUserId) {
-      storeSetCurrentUserId('user1')
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === CHAT_MESSAGES_KEY) {
+        setMessages(readMessagesFromStorage())
+      }
     }
-    setCurrentUser(storeGetCurrentUser())
-    setOtherUser(storeGetOtherUser())
-    setMessages([...storeGetMessages()])
-  }, [])
+
+    window.addEventListener('storage', onStorage)
+
+    return () => {
+      channelRef.current?.close()
+      window.removeEventListener('storage', onStorage)
+    }
+  }, [users])
 
   const sendMessage = (text: string) => {
-    if (!currentUser) return
+    if (!currentUserId) return
 
-    // Add loading message
-    const loadingId = `loading-${Date.now()}`
+    const loadingId = `loading-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     const loadingMessage: Message = {
       id: loadingId,
-      senderId: currentUser.id,
-      text: text,
+      senderId: currentUserId,
+      text,
       timestamp: Date.now(),
       isLoading: true
     }
 
-    storeAddMessage(loadingMessage)
-    setMessages([...storeGetMessages()])
-    broadcastChannel?.postMessage({ type: 'message', data: loadingMessage })
+    setMessages((prev) => {
+      const next = [...prev, loadingMessage]
+      persistMessages(next)
+      return next
+    })
 
-    // Simulate send delay and remove loading
-    setTimeout(() => {
-      storeRemoveLoadingMessage(loadingId)
+    channelRef.current?.postMessage({ type: 'message_loading', data: loadingMessage })
+
+    window.setTimeout(() => {
       const finalMessage: Message = {
-        id: `msg-${Date.now()}`,
-        senderId: currentUser.id,
-        text: text,
+        id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        senderId: currentUserId,
+        text,
         timestamp: Date.now(),
         isLoading: false
       }
-      storeAddMessage(finalMessage)
-      setMessages([...storeGetMessages()])
-      broadcastChannel?.postMessage({ type: 'message', data: finalMessage })
+
+      setMessages((prev) => {
+        const withoutLoading = prev.filter((m) => m.id !== loadingId)
+        const next = [...withoutLoading, finalMessage]
+        persistMessages(next)
+        return next
+      })
+
+      channelRef.current?.postMessage({
+        type: 'message_final',
+        data: { loadingId, message: finalMessage }
+      })
     }, 1500)
   }
 
   const switchUser = (userId: string) => {
-    storeSetCurrentUserId(userId)
-    setCurrentUser(storeGetCurrentUser())
-    setOtherUser(storeGetOtherUser())
-    broadcastChannel?.postMessage({ type: 'user_switch', data: { userId } })
+    if (!users[userId]) return
+
+    setCurrentUserId(userId)
+    window.sessionStorage.setItem(CHAT_USER_KEY, userId)
   }
 
   return (
