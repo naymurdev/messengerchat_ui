@@ -1,12 +1,12 @@
-'use client'
+"use client";
 
-import { ArrowLeft, Phone, Video, MoreVertical } from 'lucide-react'
-import { useChat } from '@/app/ChatContext'
+import { ArrowLeft, Phone, Video, MoreVertical } from "lucide-react";
+import { useChat } from "@/app/ChatContext";
 
 export function ChatHeader() {
-  const { otherUser } = useChat()
+  const { otherUser } = useChat();
 
-  if (!otherUser) return null
+  if (!otherUser) return null;
 
   return (
     <div className="flex items-center justify-between px-4 py-3 bg-card border-b border-border">
@@ -16,7 +16,12 @@ export function ChatHeader() {
         </button>
         <div className="flex items-center gap-3">
           <div className="w-12 h-12 rounded-full bg-gradient-to-br from-primary to-accent flex items-center justify-center text-lg">
-            {otherUser.avatar}
+            {/* {otherUser.avatar} */}
+            <img
+              src={otherUser.avatar}
+              alt={otherUser.name}
+              className="w-full h-full rounded-full"
+            />
           </div>
           <div>
             <h2 className="font-semibold text-foreground">{otherUser.name}</h2>
@@ -36,5 +41,5 @@ export function ChatHeader() {
         </button>
       </div>
     </div>
-  )
+  );
 }
